@@ -56,7 +56,7 @@ with col1:
 <p style="margin:0;font-size:0.95rem;line-height:1.75;color:#2a2a3e;">
 This study develops and evaluates three forecasting approaches — a classical statistical 
 method (ARIMA), a feed-forward neural network (MLP), and a recurrent deep learning model 
-(LSTM) — to predict monthly manufacturing sector output as proxied by cement production volumes.
+(LSTM) — to predict monthly manufacturing sector output.
 </p>
 </div>
 <div class="card" style="margin-top:1rem;">
