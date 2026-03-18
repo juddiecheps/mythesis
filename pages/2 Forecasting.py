@@ -1,165 +1,292 @@
 import streamlit as st
+import shap
 import numpy as np
 import pandas as pd
-import joblib
+import matplotlib
 import matplotlib.pyplot as plt
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+from utils.navbar import inject_navbar
 from tensorflow.keras.models import load_model
-from statsmodels.tsa.arima.model import ARIMAResults
+import joblib
 
-st.set_page_config(page_title="Forecasting", layout="wide")
-st.title("📊 Forecasting")
+st.set_page_config(
+    page_title="Explainable AI — Manufacturing Kenya",
+    layout="wide",
+    initial_sidebar_state="collapsed"
+)
 
-# Load all models and data
+inject_navbar("xai")
+
+# ── Load ──────────────────────────────────────────────────────────────────────
 @st.cache_resource
-def load_assets():
-    arima = ARIMAResults.load("models/arima_cement.pkl")
-    mlp   = load_model("models/mlp_cement_model.keras")
-    lstm  = load_model("models/lstm_cement_model.keras")
+def load_model_and_data():
+    model  = load_model("models/mlp_cement_model.keras")
     scaler = joblib.load("models/minmax_scaler.pkl")
     meta   = joblib.load("models/metadata.pkl")
-    data   = pd.read_csv("data/clean_data.csv", parse_dates=True, index_col=0)
-    return arima, mlp, lstm, scaler, meta, data
+    data   = pd.read_csv("data/clean_data.csv", index_col=0)
+    return model, scaler, meta, data
 
-arima, mlp, lstm, scaler, meta, data = load_assets()
-
-# Sidebar controls
-st.sidebar.header("⚙️ Forecast Controls")
-model_choice = st.sidebar.selectbox(
-    "Select Model",
-    ["ARIMA", "MLP", "LSTM"]
-)
-forecast_steps = st.sidebar.slider(
-    "Forecast Horizon (months)",
-    1, 36, 12
-)
-
-# Extract metadata
-TARGET = meta["target"]
-columns = meta["columns"]
-target_idx = columns.index(TARGET)
+model, scaler, meta, data = load_model_and_data()
+columns   = meta["columns"]
 look_back = meta["look_back"]
 
-# Recursive forecasting function for neural networks
-def recursive_forecast(model, last_window, steps, target_idx, is_lstm=True):
-    """
-    Generate multi-step forecasts recursively using neural network models.
-    
-    Args:
-        model: Trained Keras model (MLP or LSTM)
-        last_window: Last known window of scaled data
-        steps: Number of future steps to forecast
-        target_idx: Index of target variable in feature array
-        is_lstm: Boolean indicating if model is LSTM (3D input) or MLP (2D input)
-    
-    Returns:
-        Array of predicted values (scaled)
-    """
-    preds = []
-    window = last_window.copy()
-    
-    for _ in range(steps):
-        # Predict next step
-        if is_lstm:
-            p = model.predict(window[np.newaxis, :, :], verbose=0)[0, 0]
-        else:
-            p = model.predict(window.reshape(1, -1), verbose=0)[0, 0]
-        
-        preds.append(p)
-        
-        # Update window: shift and insert new prediction
-        window = np.roll(window, -1, axis=0)
-        window[-1, target_idx] = p
-    
-    return np.array(preds)
+# ── Inline controls ──────────────────────────────────────────────────────────
+st.markdown('<style>.ctrl-lbl{font-size:0.66rem;letter-spacing:0.15em;text-transform:uppercase;color:var(--muted);font-weight:600;margin-bottom:0.4rem;}</style>', unsafe_allow_html=True)
+xctrl1, xctrl2 = st.columns([1, 1])
+with xctrl1:
+    st.markdown('<div class="ctrl-lbl">Samples to Explain</div>', unsafe_allow_html=True)
+    n_samples = st.slider("Samples", 5, 15, 10, label_visibility="collapsed")
+with xctrl2:
+    st.markdown('<div class="ctrl-lbl">Waterfall Sample Index</div>', unsafe_allow_html=True)
+    sample_idx = st.slider("Sample index", 0, n_samples - 1, 0, label_visibility="collapsed")
 
-# Generate forecasts
-last_window = scaler.transform(data[columns].iloc[-look_back:])
+# ── Header ────────────────────────────────────────────────────────────────────
+st.markdown("""
+<div class="page-header">
+    <div class="eyebrow">Interpretability</div>
+    <h1>Explainable AI — SHAP Analysis</h1>
+    <p>Feature attribution analysis using SHAP values to understand model behaviour and predictor importance</p>
+</div>
+""", unsafe_allow_html=True)
 
-if model_choice == "ARIMA":
-    preds = arima.forecast(steps=forecast_steps).values
+# ── Prepare ───────────────────────────────────────────────────────────────────
+def make_windows(df, cols, look_back):
+    X = []
+    for i in range(len(df) - look_back):
+        window = scaler.transform(df[cols].iloc[i:i + look_back])
+        X.append(window.flatten())
+    return np.array(X)
+
+X_all        = make_windows(data, columns, look_back)
+X_background = X_all[:50]
+X_test       = X_all[-n_samples:]
+feature_names = [
+    f"{col}_t-{look_back - i - 1}"
+    for i in range(look_back)
+    for col in columns
+]
+
+# ── SHAP ──────────────────────────────────────────────────────────────────────
+st.markdown("""
+<div class="notice" style="margin-bottom:1.5rem;">
+    Computing SHAP values — this typically takes 15–30 seconds on first load.
+</div>
+""", unsafe_allow_html=True)
+
+with st.spinner("Running SHAP attribution analysis..."):
+    try:
+        explainer      = shap.DeepExplainer(model, X_background)
+        shap_values    = explainer.shap_values(X_test)
+        expected_value = explainer.expected_value
+        method         = "DeepExplainer"
+    except Exception:
+        explainer      = shap.KernelExplainer(model.predict, X_background[:20])
+        shap_values    = explainer.shap_values(X_test, nsamples=100)
+        expected_value = explainer.expected_value
+        method         = "KernelExplainer"
+
+# Normalise shap_values to plain 2-D float array
+if isinstance(shap_values, list):
+    shap_values = shap_values[0]
+shap_values = np.array(shap_values, dtype=float)
+if shap_values.ndim == 3:
+    shap_values = shap_values[:, :, 0]
+shap_values = shap_values[:len(X_test)]
+
+# Safely convert expected_value to a plain Python float.
+# DeepExplainer can return a TF tensor; calling float() on it directly
+# raises "Scalar tensor has no len()" inside shap.Explanation.
+def _safe_float(v):
+    try:
+        if hasattr(v, "numpy"):          # TF/Keras tensor
+            v = v.numpy()
+        arr = np.array(v, dtype=float).flatten()
+        return float(arr[0]) if len(arr) > 0 else 0.0
+    except Exception:
+        return 0.0
+
+if isinstance(expected_value, (list, tuple)):
+    expected_value = _safe_float(expected_value[0])
 else:
-    preds_scaled = recursive_forecast(
-        lstm if model_choice == "LSTM" else mlp,
-        last_window,
-        forecast_steps,
-        target_idx,
-        is_lstm=(model_choice == "LSTM")
+    expected_value = _safe_float(expected_value)
+
+NAVY = "#0d1b2a"; TEAL = "#1a6b72"; GOLD = "#c8973a"; LIGHT = "#f5f0e8"; RED = "#c0392b"
+
+# ── Aggregated importance ─────────────────────────────────────────────────────
+grouped = {}
+for i, fname in enumerate(feature_names):
+    base = fname.rsplit("_t-", 1)[0]
+    grouped.setdefault(base, []).append(i)
+
+agg_importance = {
+    feat: np.mean(np.abs(shap_values[:, idxs]))
+    for feat, idxs in grouped.items()
+}
+agg_df = (pd.DataFrame.from_dict(agg_importance, orient="index", columns=["Importance"])
+          .sort_values("Importance", ascending=False))
+
+col1, col2 = st.columns([2, 3], gap="large")
+
+with col1:
+    st.markdown('<div class="section-label">Aggregate View</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Indicator Importance</div>', unsafe_allow_html=True)
+    st.markdown("""<div style="font-size:0.84rem;color:var(--muted);margin-bottom:1rem;line-height:1.6;">
+Mean absolute SHAP across all 12 time lags — which indicators drive the model's forecasts most.
+</div>""", unsafe_allow_html=True)
+
+    max_val = agg_df["Importance"].max()
+    rows_html = ""
+    for feat, row in agg_df.iterrows():
+        pct   = row["Importance"] / max_val * 100
+        clean = feat.replace("_", " ")
+        rows_html += f"""
+<div style="padding:0.55rem 0;border-bottom:1px solid var(--border);">
+    <div style="font-size:0.82rem;color:var(--navy);margin-bottom:0.28rem;">{clean}</div>
+    <div style="display:flex;align-items:center;gap:0.6rem;">
+        <div style="flex:1;height:7px;background:#e8e4de;border-radius:4px;overflow:hidden;">
+            <div style="width:{pct:.1f}%;height:100%;background:{TEAL};border-radius:4px;"></div>
+        </div>
+        <span style="font-size:0.78rem;font-variant-numeric:tabular-nums;color:{TEAL};font-weight:600;width:52px;text-align:right;">{row['Importance']:.4f}</span>
+    </div>
+</div>"""
+    st.markdown(f'<div class="card card-teal">{rows_html}</div>', unsafe_allow_html=True)
+
+with col2:
+    st.markdown('<div class="section-label">Distribution Summary</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">SHAP Summary Plot</div>', unsafe_allow_html=True)
+
+    fig1, _ = plt.subplots(figsize=(7.5, 6))
+    fig1.patch.set_facecolor(LIGHT)
+    shap.summary_plot(shap_values, X_test, feature_names=feature_names, max_display=18, show=False, plot_size=None)
+    ax1 = plt.gca()
+    ax1.set_facecolor(LIGHT); fig1.patch.set_facecolor(LIGHT)
+    ax1.tick_params(labelsize=7.5, colors="#5a6475")
+    for sp in ["top","right"]: ax1.spines[sp].set_visible(False)
+    ax1.spines["left"].set_color("#d6cfc4"); ax1.spines["bottom"].set_color("#d6cfc4")
+    ax1.set_xlabel("SHAP value (impact on model output)", fontsize=8.5, color="#5a6475")
+    plt.tight_layout(pad=1.2)
+    st.pyplot(fig1); plt.close(fig1)
+
+st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+
+# ── Waterfall ─────────────────────────────────────────────────────────────────
+st.markdown('<div class="section-label">Single Prediction Breakdown</div>', unsafe_allow_html=True)
+st.markdown(f'<div class="section-title">Waterfall Explanation — Sample {sample_idx}</div>', unsafe_allow_html=True)
+
+single_shap = np.array(shap_values[sample_idx]).reshape(-1)
+single_data = np.array(X_test[sample_idx]).reshape(-1)
+
+col3, col4 = st.columns([3, 2], gap="large")
+
+with col3:
+    explanation = shap.Explanation(
+        values=single_shap, base_values=expected_value,
+        data=single_data, feature_names=feature_names,
     )
-    preds = scaler.inverse_transform(
-        np.column_stack([preds_scaled] * len(columns))
-    )[:, target_idx]
+    fig2, _ = plt.subplots(figsize=(7.5, 6))
+    fig2.patch.set_facecolor(LIGHT)
+    shap.plots.waterfall(explanation, max_display=12, show=False)
+    ax2 = plt.gca()
+    ax2.set_facecolor(LIGHT); fig2.patch.set_facecolor(LIGHT)
+    ax2.tick_params(labelsize=7.5, colors="#5a6475")
+    for sp in ["top","right"]: ax2.spines[sp].set_visible(False)
+    ax2.spines["left"].set_color("#d6cfc4"); ax2.spines["bottom"].set_color("#d6cfc4")
+    plt.tight_layout(pad=1.2)
+    st.pyplot(fig2); plt.close(fig2)
 
-# Create forecast dates
-last_date = data.index[-1]
-forecast_dates = pd.date_range(start=last_date, periods=forecast_steps + 1, freq='MS')[1:]
+with col4:
+    st.markdown('<div class="section-label">Top Drivers</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Key Feature Impacts</div>', unsafe_allow_html=True)
 
-# Display results
-st.subheader(f"{model_choice} Forecast")
-st.write(f"Forecasting **{forecast_steps} months** ahead from {last_date.strftime('%Y-%m')}")
+    top_k   = 8
+    top_idx = np.argsort(np.abs(single_shap))[::-1][:top_k]
+    max_abs = np.abs(single_shap[top_idx]).max()
 
-# Create forecast dataframe
-forecast_df = pd.DataFrame({
-    'Date': forecast_dates,
-    'Predicted Value': preds
-})
-forecast_df.set_index('Date', inplace=True)
+    driver_rows = ""
+    for idx in top_idx:
+        val   = single_shap[idx]
+        pct   = abs(val) / max_abs * 100
+        color = TEAL if val > 0 else RED
+        sign  = "+" if val > 0 else ""
+        clean = feature_names[idx].replace("_", " ")
+        driver_rows += f"""
+<div style="padding:0.5rem 0;border-bottom:1px solid var(--border);">
+    <div style="font-size:0.78rem;color:var(--muted);margin-bottom:0.22rem;">{clean}</div>
+    <div style="display:flex;align-items:center;gap:0.6rem;">
+        <div style="flex:1;height:6px;background:#e8e4de;border-radius:3px;overflow:hidden;">
+            <div style="width:{pct:.1f}%;height:100%;background:{color};border-radius:3px;"></div>
+        </div>
+        <span style="font-size:0.8rem;font-weight:700;color:{color};width:60px;text-align:right;">{sign}{val:.4f}</span>
+    </div>
+</div>"""
 
-# Plot
-fig, ax = plt.subplots(figsize=(14, 6))
-
-# Plot historical data
-historical_lookback = min(60, len(data))
-ax.plot(data.index[-historical_lookback:], 
-        data[TARGET].iloc[-historical_lookback:], 
-        label='Historical Data', 
-        linewidth=2, 
-        color='blue')
-
-# Plot forecast
-ax.plot(forecast_dates, 
-        preds, 
-        label=f'{model_choice} Forecast', 
-        linewidth=2, 
-        color='red', 
-        linestyle='--', 
-        marker='o', 
-        markersize=4)
-
-ax.set_xlabel('Date', fontsize=12)
-ax.set_ylabel(TARGET, fontsize=12)
-ax.set_title(f'{model_choice} Forecast for {TARGET}', fontsize=14, fontweight='bold')
-ax.legend(fontsize=11)
-ax.grid(True, alpha=0.3)
-plt.tight_layout()
-
-st.pyplot(fig)
-
-# Display forecast table
-st.subheader("Forecast Values")
-st.dataframe(forecast_df.style.format({'Predicted Value': '{:.2f}'}), use_container_width=True)
-
-# Download forecast
-csv = forecast_df.to_csv()
-st.download_button(
-    label="📥 Download Forecast as CSV",
-    data=csv,
-    file_name=f"{model_choice}_forecast_{forecast_steps}months.csv",
-    mime="text/csv"
-)
-
-# Model information
-with st.expander("ℹ️ Model Information"):
     st.markdown(f"""
-    **Selected Model:** {model_choice}
-    
-    **Model Details:**
-    - **ARIMA**: Statistical time series model using AutoRegressive Integrated Moving Average
-    - **MLP**: Multi-Layer Perceptron neural network with dense layers
-    - **LSTM**: Long Short-Term Memory recurrent neural network for sequence modeling
-    
-    **Target Variable:** {TARGET}
-    
-    **Features Used:** {', '.join(columns)}
-    
-    **Look-back Window:** {look_back} months
-    """)
+<div class="card card-gold">
+{driver_rows}
+<p style="font-size:0.74rem;color:var(--muted);margin:0.8rem 0 0 0;">
+Teal = positive impact (raises forecast). Red = negative impact (lowers forecast). Values in MinMax-scaled units.
+</p>
+</div>
+<div class="card" style="margin-top:1rem;padding:1rem 1.2rem;">
+    <div style="font-size:0.66rem;letter-spacing:0.1em;text-transform:uppercase;color:var(--muted);font-weight:600;margin-bottom:0.4rem;">Method</div>
+    <div style="font-size:0.85rem;color:var(--navy);font-weight:600;margin-bottom:0.3rem;">{method}</div>
+    <div style="font-size:0.8rem;color:var(--muted);line-height:1.6;">
+        {n_samples} test samples · {len(X_background)} background samples · Model: MLP
+    </div>
+</div>
+""", unsafe_allow_html=True)
+
+# ── Footer ────────────────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+.site-footer {
+    position: fixed;
+    bottom: 0; left: 0; right: 0;
+    background: var(--navy);
+    border-top: 1px solid rgba(255,255,255,0.07);
+    padding: 0.6rem 2.5rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    z-index: 9980;
+}
+.footer-name {
+    font-family: 'Playfair Display', serif;
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: #ffffff;
+    letter-spacing: 0.02em;
+}
+.footer-institution {
+    font-size: 0.72rem;
+    color: #4a6278;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+.footer-divider {
+    width: 1px; height: 18px;
+    background: rgba(255,255,255,0.1);
+    margin: 0 1rem;
+    display: inline-block;
+    vertical-align: middle;
+}
+.footer-right {
+    font-size: 0.68rem;
+    color: #2e4055;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+}
+/* Push page content above the footer */
+.block-container { padding-bottom: 4rem !important; }
+</style>
+
+<div class="site-footer">
+    <div>
+        <span class="footer-name">Judith Jepkoech</span>
+        <span class="footer-divider"></span>
+        <span class="footer-institution">Strathmore University &nbsp;·&nbsp; Dissertation Project</span>
+    </div>
+    <div class="footer-right">Manufacturing Sector Forecasting &nbsp;·&nbsp; 2025</div>
+</div>
+""", unsafe_allow_html=True)
