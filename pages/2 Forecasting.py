@@ -255,12 +255,12 @@ st.markdown("""
     font-family: 'Playfair Display', serif;
     font-size: 0.82rem;
     font-weight: 600;
-    color: #ffffff;
+    color: #ffffff;   /* White */
     letter-spacing: 0.02em;
 }
 .footer-institution {
     font-size: 0.72rem;
-    color: #4a6278;
+    color: #ffffff;   /* Changed to white */
     letter-spacing: 0.08em;
     text-transform: uppercase;
 }
@@ -273,7 +273,7 @@ st.markdown("""
 }
 .footer-right {
     font-size: 0.68rem;
-    color: #2e4055;
+    color: #ffffff;   /* Changed to white */
     letter-spacing: 0.1em;
     text-transform: uppercase;
 }
@@ -287,6 +287,6 @@ st.markdown("""
         <span class="footer-divider"></span>
         <span class="footer-institution">Strathmore University &nbsp;·&nbsp; Dissertation Project</span>
     </div>
-    <div class="footer-right">Manufacturing Sector Forecasting &nbsp;·&nbsp; 2025</div>
+    <div class="footer-right">Manufacturing Sector Forecasting &nbsp;·&nbsp; 2026</div>
 </div>
 """, unsafe_allow_html=True)
