@@ -39,7 +39,7 @@ st.markdown("""
 </style>
 
 <div class="hero">
-    <div class="hero-eyebrow">University Research — Applied Machine Learning</div>
+    <div class="hero-eyebrow">Strathmore University — Dissertation Project</div>
     <h1>Manufacturing Sector<br>Forecasting in Kenya</h1>
     <p>A comparative study of ARIMA, MLP, and LSTM models for forecasting Kenya's manufacturing 
     sector activity using high-frequency production indicators from the Kenya National Bureau of Statistics.</p>
